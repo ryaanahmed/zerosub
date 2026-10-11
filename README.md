@@ -1,5 +1,15 @@
 # ZeroSub
 
+This is [Ryaan's maintained fork](https://github.com/ryaanahmed/zerosub) of
+[kapybara-org/zerosub](https://github.com/kapybara-org/zerosub), based on upstream
+1.2.1. The upstream MIT license and attribution are retained.
+
+The fork keeps subscription routing through the exact trusted local Gobstopper
+endpoint, repairs Windows npm-CLI session reload, and starts code sign-in in
+compact browser clients. See [fork maintenance](FORK.md) for policy, validation
+and update instructions. The mobile change has unit coverage, but has not yet
+been validated on a physical phone.
+
 Use several Claude and ChatGPT (Codex) subscriptions side by side in [Paseo](https://paseo.sh), without logging in and out of the CLI.
 
 - **Add accounts in the app.** Click **Add account** under Claude or ChatGPT and sign in on any device, including your phone. You don't need a terminal, environment variables or config files.
@@ -20,13 +30,21 @@ Requirements:
 - Paseo 0.9.1 or later, with plugins enabled (**Settings → Plugins → Enable plugins**).
 - The `claude` and/or `codex` CLI installed where the daemon runs, the same ones Paseo already uses.
 
-In the app, open **Settings → Plugins**, paste `npm:@kapybara/zerosub` as the plugin source, and install. Or, on the daemon host:
+Install this fork from its pinned Git tag on the daemon host:
 
 ```bash
-paseo plugin install npm:@kapybara/zerosub
-# or straight from GitHub:
-paseo plugin install github:kapybara-org/zerosub
+paseo plugin install git:ryaanahmed/zerosub --ref v1.2.1-ryaan.1
 ```
+
+Keep runtime plugin ID `zerosub` when replacing an existing installation. Its
+account registry and credential homes stay under the existing Paseo home; do
+not remove those directories or migrate credentials between hosts. Wait until
+no account sign-in is in progress before replacing or reloading the plugin.
+
+The npm package `@kapybara/zerosub` remains the upstream release and does not
+include this fork's fixes. `--ref` selects the initial revision only: Paseo's
+normal Git update action follows the repository's default HEAD, so review
+updates explicitly rather than treating the tag as a permanent update lock.
 
 Then open **Accounts (ZeroSub)** in the sidebar.
 
