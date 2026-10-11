@@ -26,10 +26,22 @@ export class Reopener {
   async reopen(agentId: string): Promise<{ ok: true } | { ok: false; error: string; timedOut: boolean }> {
     const cli = await this.locate();
     if (!cli) return { ok: false, error: "The paseo command-line tool was not found on the daemon machine.", timedOut: false };
+    let command = cli;
+    let args = ["agent", "reload", agentId, "--json", "--home", paseoHome()];
+    if (process.platform === "win32" && cli.toLowerCase().endsWith(".cmd")) {
+      const entry = join(dirname(cli), "node_modules", "@getpaseo", "cli", "bin", "paseo");
+      try {
+        await access(entry, constants.R_OK);
+      } catch {
+        return { ok: false, error: "The Windows Paseo npm CLI entry point was not found beside its launcher.", timedOut: false };
+      }
+      command = process.execPath;
+      args = [entry, ...args];
+    }
     return new Promise((resolve) => {
       execFile(
-        cli,
-        ["agent", "reload", agentId, "--json", "--home", paseoHome()],
+        command,
+        args,
         { timeout: 90_000, maxBuffer: 1024 * 1024, env: process.env },
         (error, _stdout, stderr) => {
           if (!error) return resolve({ ok: true });
