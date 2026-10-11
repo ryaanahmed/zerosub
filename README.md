@@ -36,10 +36,20 @@ Install this fork from its pinned Git tag on the daemon host:
 paseo plugin install git:ryaanahmed/zerosub --ref v1.2.1-ryaan.1
 ```
 
-Keep runtime plugin ID `zerosub` when replacing an existing installation. Its
-account registry and credential homes stay under the existing Paseo home; do
-not remove those directories or migrate credentials between hosts. Wait until
-no account sign-in is in progress before replacing or reloading the plugin.
+Paseo 0.11.2 refuses installation while that plugin ID is already registered.
+For an existing installation, first record its source path/revision and confirm
+no sign-in is active, then replace only the registration:
+
+```bash
+paseo plugin remove zerosub
+paseo plugin install git:ryaanahmed/zerosub --ref v1.2.1-ryaan.1
+```
+
+Keep runtime plugin ID `zerosub`. The tested removal retains the old source and
+`PASEO_HOME/zerosub` account registry and credential homes. Do not remove those
+directories or migrate credentials between hosts. If installation fails, install
+the recorded old source path to restore its registration. Verify accounts and
+defaults after replacement.
 
 The npm package `@kapybara/zerosub` remains the upstream release and does not
 include this fork's fixes. `--ref` selects the initial revision only: Paseo's
@@ -137,12 +147,12 @@ ZeroSub never implements OAuth itself and never copies credentials between accou
 - **Password-protected daemons:** `paseo agent reload` can't authenticate. Agents then switch the next time their session starts, not immediately, and their timeline note says so.
 - **Imported Codex threads** (`paseo agent import`) are assigned to your CLI login, since that's where standalone Codex sessions come from.
 - **ChatGPT device-code sign-in** has to be enabled in ChatGPT → Settings → Security. The browser option works from a browser on the host's own computer.
-- Tested on macOS with Claude Code 2.1.280, Codex 0.156.1 and Paseo 0.9.1. Linux should work. Windows is untested.
+- Upstream tested macOS with Claude Code 2.1.280, Codex 0.156.1 and Paseo 0.9.1. This fork also preserves the tested native Windows npm-CLI reload fix on Paseo 0.11.2. Other Windows packaging layouts and physical mobile clients remain unverified.
 
 ## Development
 
 ```bash
-git clone https://github.com/kapybara-org/zerosub.git
+git clone git@github.com-personal:ryaanahmed/zerosub.git
 cd zerosub
 npm install
 paseo plugin install "$(pwd)"   # run the working copy

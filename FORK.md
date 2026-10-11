@@ -42,7 +42,10 @@ paseo plugin install git:ryaanahmed/zerosub --ref v1.2.1-ryaan.1
 ```
 
 Before replacement, record the current plugin source/revision and check that no
-account sign-in is active. Retain the prior source directory for rollback.
+account sign-in is active. Paseo 0.11.2 refuses an already-registered plugin ID:
+run `paseo plugin remove zerosub` first, then the pinned install command above.
+This removes the registration; the tested hosts retained the old source directory
+and account storage. Retain the prior source path for rollback.
 Account state lives under `PASEO_HOME/zerosub`, separately from the installed
 plugin source. Do not remove it, copy tokens between hosts or overwrite it with
 an old snapshot merely to roll back code.
