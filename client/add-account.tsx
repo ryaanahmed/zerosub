@@ -5,6 +5,7 @@ import { ActivityIndicator, Pressable, Text, View } from "react-native";
 import { formatPlan } from "../shared/format";
 import { FAMILY_LABEL, type Family, type LoginMethod, type LoginView } from "../shared/model";
 import { cancelLogin, startLogin, submitLoginCode } from "../shared/rpc";
+import { initialLoginMethod } from "./login-method";
 import { describe, useStore, type ZeroSubStore } from "./store";
 import { Button, useText } from "./ui";
 
@@ -32,12 +33,8 @@ export function AddAccountModal({
 }) {
   const text = useText(theme);
   const { state } = useStore(store);
-  // A browser sign-in finishes by redirecting to `localhost` on the host's computer, so it only
-  // works from a browser there, and never on hosts without a desktop (servers, containers).
-  // Phones start with a code; the browser stays on offer for someone at the host's computer.
-  const mobile = layout.platform === "ios" || layout.platform === "android";
   const hostBrowser = state?.browserSignIn !== false;
-  const [method, setMethod] = useState<LoginMethod>(hostBrowser && !mobile ? "browser" : "code");
+  const [method, setMethod] = useState<LoginMethod>(() => initialLoginMethod(layout, state?.browserSignIn));
   const [loginId, setLoginId] = useState<string | null>(null);
   const [startError, setStartError] = useState<string | null>(null);
   // Each start gets a number; only the newest one's answer counts.
