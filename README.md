@@ -151,11 +151,17 @@ ZeroSub never implements OAuth itself and never copies credentials between accou
 
 ## Development
 
+Load your existing nvm installation first. Replace the absolute checkout path
+below with your chosen location; the SSH alias selects the maintainer's personal
+GitHub account. Remove an existing plugin registration before installing the
+working copy, as described above.
+
 ```bash
-git clone git@github.com-personal:ryaanahmed/zerosub.git
-cd zerosub
-npm install
-paseo plugin install "$(pwd)"   # run the working copy
+git clone git@github.com-personal:ryaanahmed/zerosub.git /absolute/path/to/zerosub
+cd /absolute/path/to/zerosub
+nvm use 22
+npm ci
+paseo plugin install /absolute/path/to/zerosub   # run the working copy
 
 npm run typecheck      # client and server bundles, separately
 npm test               # routing, failover, limit detection, usage, resets, forks
@@ -170,7 +176,7 @@ Code layout:
 - `server/`: routing, account homes, Claude and Codex adapters, failover.
 - `shared/`: RPC contracts and the view model.
 
-Report problems at [github.com/kapybara-org/ZeroSub/issues](https://github.com/kapybara-org/ZeroSub/issues).
+Report problems at [github.com/ryaanahmed/zerosub/issues](https://github.com/ryaanahmed/zerosub/issues).
 
 ## Uninstall
 
