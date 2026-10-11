@@ -5,10 +5,10 @@ This is [Ryaan's maintained fork](https://github.com/ryaanahmed/zerosub) of
 1.2.1. The upstream MIT license and attribution are retained.
 
 The fork keeps subscription routing through the exact trusted local Gobstopper
-endpoint, repairs Windows npm-CLI session reload, and starts code sign-in in
-compact browser clients. See [fork maintenance](FORK.md) for policy, validation
-and update instructions. The mobile change has unit coverage, but has not yet
-been validated on a physical phone.
+endpoint, repairs Windows npm-CLI session reload, starts code sign-in in
+compact browser clients, and avoids a mobile-engine crash during plugin startup. See [fork maintenance](FORK.md) for policy, validation
+and update instructions. The startup failure was reproduced in Hermes, the React Native JavaScript
+engine. Physical-phone acceptance remains pending.
 
 Use several Claude and ChatGPT (Codex) subscriptions side by side in [Paseo](https://paseo.sh), without logging in and out of the CLI.
 
@@ -33,16 +33,22 @@ Requirements:
 Install this fork from its pinned Git tag on the daemon host:
 
 ```bash
-paseo plugin install git:ryaanahmed/zerosub --ref v1.2.1-ryaan.1
+paseo plugin install git:ryaanahmed/zerosub --ref v1.2.1-ryaan.2
 ```
 
-Paseo 0.11.2 refuses installation while that plugin ID is already registered.
-For an existing installation, first record its source path/revision and confirm
-no sign-in is active, then replace only the registration:
+For an existing installation from this fork, first confirm no sign-in is active,
+then update to the reviewed revision:
+
+```bash
+paseo plugin update zerosub --ref v1.2.1-ryaan.2
+```
+
+Changing from the upstream npm source to this fork requires replacing the
+registration. Record a restorable source revision before removal:
 
 ```bash
 paseo plugin remove zerosub
-paseo plugin install git:ryaanahmed/zerosub --ref v1.2.1-ryaan.1
+paseo plugin install git:ryaanahmed/zerosub --ref v1.2.1-ryaan.2
 ```
 
 Keep runtime plugin ID `zerosub`. Paseo cleans up the previous managed source directory during replacement.

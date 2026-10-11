@@ -1,6 +1,6 @@
 # Fork maintenance
 
-This fork keeps three bounded fixes on top of upstream ZeroSub 1.2.1
+This fork keeps four bounded fixes on top of upstream ZeroSub 1.2.1
 (`2354700ad8749bebc3cff142190c37e1a7bd8999`). It preserves upstream's MIT license,
 plugin ID `zerosub`, account storage layout and normal routing behavior.
 
@@ -11,6 +11,7 @@ plugin ID `zerosub`, account storage layout and normal routing behavior.
 | Trusted Gobstopper endpoint | Claude providers using exactly `http://127.0.0.1:8260` remain eligible for subscription routing. Other URLs, explicit credentials, alternate backends and custom account homes remain excluded. This is a deliberate local deployment policy, not a general promise that every proxy is trusted. |
 | Windows session reload | Node cannot execute the npm `paseo.cmd` launcher directly through `execFile`. Invoke its sibling JavaScript entry point with the plugin's Node executable and separate arguments, without a shell. Refuse a missing entry point; other packaging layouts are not implied supported. |
 | Compact-client sign-in | Mobile web reports platform `web`, so the former native-platform check offered a localhost callback on the wrong computer. Native and compact clients default to code sign-in; wide web clients retain browser sign-in and the explicit method switch remains available. |
+| Mobile plugin startup | Hermes crashes when constructing the bundled client-store class during plugin activation. Use a closure factory with the same store API, polling and cleanup behavior. No account or server behavior changes. |
 
 The current plugin SDK exposes platform and compact layout, but no reliable
 client/daemon locality. Wide tablet browsers and remote wide-desktop clients
@@ -27,6 +28,16 @@ API audit on Node 22. The added cases cover endpoint exclusions, native Windows
 launcher handling and sign-in selection. The static audit detects forbidden
 DOM usage; it is not a phone-rendering test.
 
+The mobile-startup release passed all 118 tests and both TypeScript checks.
+Its regression test executes store creation, polling startup and cleanup in the
+Hermes interpreter already shipped with React Native on macOS. Other platforms
+skip that interpreter check and still run the store behavior tests. The actual
+Paseo 0.11.2 client bundle reproduced `Cannot read property 'prototype' of
+undefined` while constructing the store. A rebuilt bundle using the same
+compiler options activated all contributions and cleaned up under the same
+Hermes engine with SDK stubs. Those stubs do not test rendering or device SDK
+compatibility; physical-phone acceptance remains pending.
+
 The two server fixes were already exercised in the native Windows deployment
 before being moved into this fork. Verify plugin load after each source update.
 Actual iOS/Android/browser interaction still needs a device check, and automatic
@@ -38,11 +49,17 @@ changes.
 Install a reviewed immutable commit or the fork tag, keeping plugin ID `zerosub`:
 
 ```sh
-paseo plugin install git:ryaanahmed/zerosub --ref v1.2.1-ryaan.1
+paseo plugin install git:ryaanahmed/zerosub --ref v1.2.1-ryaan.2
 ```
 
-Before replacement, record the current plugin source/revision and check that no
-account sign-in is active. Paseo 0.11.2 refuses an already-registered plugin ID:
+For an installation already using this fork, use the supported pinned update:
+
+```sh
+paseo plugin update zerosub --ref v1.2.1-ryaan.2
+```
+
+Before any update or replacement, record the current plugin source/revision and check that no
+account sign-in is active. When changing source identity, Paseo 0.11.2 refuses an already-registered plugin ID:
 run `paseo plugin remove zerosub` first, then the pinned install command above.
 Paseo cleans up managed source directories, so the old installed path is not a
 rollback artifact. Identify a reproducible source revision or preserve a source
