@@ -23,7 +23,10 @@ const OWN_AUTH_KEYS: Record<Family, readonly string[]> = {
 
 export function bringsOwnAuth(family: Family, env: Record<string, unknown> | undefined): boolean {
   if (!env) return false;
-  return OWN_AUTH_KEYS[family].some((key) => typeof env[key] === "string" && env[key] !== "");
+  return OWN_AUTH_KEYS[family].some((key) => {
+    if (family === "claude" && key === "ANTHROPIC_BASE_URL" && env[key] === "http://127.0.0.1:8260") return false;
+    return typeof env[key] === "string" && env[key] !== "";
+  });
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
