@@ -45,11 +45,12 @@ paseo plugin remove zerosub
 paseo plugin install git:ryaanahmed/zerosub --ref v1.2.1-ryaan.1
 ```
 
-Keep runtime plugin ID `zerosub`. The tested removal retains the old source and
-`PASEO_HOME/zerosub` account registry and credential homes. Do not remove those
-directories or migrate credentials between hosts. If installation fails, install
-the recorded old source path to restore its registration. Verify accounts and
-defaults after replacement.
+Keep runtime plugin ID `zerosub`. Paseo cleans up the previous managed source directory during replacement.
+The `PASEO_HOME/zerosub` account registry and credential homes remain separate;
+do not remove them or migrate credentials between hosts. Record a restorable
+immutable source revision, not just the old installation path. If installation
+fails, install that known-good revision. See [rollback](FORK.md#installation-and-rollback).
+Verify accounts and defaults after replacement.
 
 The npm package `@kapybara/zerosub` remains the upstream release and does not
 include this fork's fixes. `--ref` selects the initial revision only: Paseo's

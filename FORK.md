@@ -44,20 +44,34 @@ paseo plugin install git:ryaanahmed/zerosub --ref v1.2.1-ryaan.1
 Before replacement, record the current plugin source/revision and check that no
 account sign-in is active. Paseo 0.11.2 refuses an already-registered plugin ID:
 run `paseo plugin remove zerosub` first, then the pinned install command above.
-This removes the registration; the tested hosts retained the old source directory
-and account storage. Retain the prior source path for rollback.
+Paseo cleans up managed source directories, so the old installed path is not a
+rollback artifact. Identify a reproducible source revision or preserve a source
+archive before removal. Account storage is separate and remained intact on both
+tested hosts.
 Account state lives under `PASEO_HOME/zerosub`, separately from the installed
 plugin source. Do not remove it, copy tokens between hosts or overwrite it with
 an old snapshot merely to roll back code.
 
 After replacement, confirm the plugin is running and account IDs/defaults remain
 present. A plugin replacement does not require restarting the Paseo daemon or
-reopening ordinary agents. Restore the prior source definition and reload the
-plugin if the new source does not load.
+reopening ordinary agents. Install a known-good source revision if the new source does not load.
 
 Paseo's `--ref` chooses the initial Git content. Its later update action follows
 the default branch, not that selector. Preview and review updates explicitly;
 there is no automatic-update lock implied by this command.
+
+The immutable server-fix baseline `9fa1f41efd5ab21e9396d1fd325544692f1ee7e2` contains the
+previous Gobstopper and Windows behavior without the compact-client change. It
+can be installed from this fork as a code rollback; it is not an account-state
+snapshot. After recording the current source and confirming no sign-in is active:
+
+```sh
+paseo plugin remove zerosub
+paseo plugin install git:ryaanahmed/zerosub --ref 9fa1f41efd5ab21e9396d1fd325544692f1ee7e2
+```
+
+Validate plugin load and account identities afterward. This rollback procedure
+was not exercised against live accounts during the rollout.
 
 ## Maintain the fork
 
