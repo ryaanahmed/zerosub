@@ -10,8 +10,9 @@ export const CONTINUED_FROM_LABEL = "zerosub.continued-from";
 export const SOURCE_PROFILE_LABEL = "zerosub.source-profile";
 
 // The daemon supplies these optional snapshot fields; the published SDK predates them.
-// Parse only the policy and provenance, never copy the source agent's environment.
+// Parse only the policy, descriptive role and provenance, never copy the source agent's environment.
 const ContinuationContextSchema = z.object({
+  role: z.enum(["ustad", "mushir", "karigar", "shagird"]).optional(),
   contextPolicy: z.object({
     providerWindowTokens: z.number().int().positive(),
     clientWindowTokens: z.number().int().positive(),
@@ -28,7 +29,10 @@ export function continuationContext(source: unknown) {
   const sourceProfile = snapshot.profileId ?? snapshot.labels?.[SOURCE_PROFILE_LABEL];
   if (sourceProfile) labels[SOURCE_PROFILE_LABEL] = sourceProfile;
   return {
-    config: snapshot.contextPolicy ? { contextPolicy: snapshot.contextPolicy } : {},
+    config: {
+      ...(snapshot.contextPolicy ? { contextPolicy: snapshot.contextPolicy } : {}),
+      ...(snapshot.role ? { role: snapshot.role } : {}),
+    },
     // A profile is mutable and may choose another provider. Keep its provenance without
     // resolving it again; the original agent's concrete policy remains authoritative.
     labels,

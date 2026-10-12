@@ -44,3 +44,20 @@ describe("continuation context policy", () => {
     expect(() => continuationContext({ contextPolicy: { clientWindowTokens: 500_000 } })).toThrow();
   });
 });
+
+
+describe("continuation role snapshot", () => {
+  it.each(["ustad", "mushir", "karigar", "shagird"])("preserves the recorded %s role", (role) => {
+    expect(continuationContext({ role, contextPolicy: policy, profileId: "mutable-profile" })).toEqual({
+      config: { role, contextPolicy: policy },
+      labels: { [SOURCE_PROFILE_LABEL]: "mutable-profile" },
+    });
+  });
+
+  it("does not infer a role from profile names or copy unrelated authority", () => {
+    expect(continuationContext({ profileId: "ustad", title: "Ustad", permissions: "all" })).toEqual({
+      config: {}, labels: { [SOURCE_PROFILE_LABEL]: "ustad" },
+    });
+    expect(() => continuationContext({ role: "admin" })).toThrow();
+  });
+});
