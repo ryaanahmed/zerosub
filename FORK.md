@@ -1,6 +1,6 @@
 # Fork maintenance
 
-This fork keeps four bounded fixes on top of upstream ZeroSub 1.2.1
+This fork keeps bounded fixes on top of upstream ZeroSub 1.2.1
 (`2354700ad8749bebc3cff142190c37e1a7bd8999`). It preserves upstream's MIT license,
 plugin ID `zerosub`, account storage layout and normal routing behavior.
 
@@ -12,6 +12,7 @@ plugin ID `zerosub`, account storage layout and normal routing behavior.
 | Windows session reload | Node cannot execute the npm `paseo.cmd` launcher directly through `execFile`. Invoke its sibling JavaScript entry point with the plugin's Node executable and separate arguments, without a shell. Refuse a missing entry point; other packaging layouts are not implied supported. |
 | Compact-client sign-in | Mobile web reports platform `web`, so the former native-platform check offered a localhost callback on the wrong computer. Native and compact clients default to code sign-in; wide web clients retain browser sign-in and the explicit method switch remains available. |
 | Mobile plugin startup | Hermes crashes when constructing the bundled client-store class during plugin activation. Use a closure factory with the same store API, polling and cleanup behavior. No account or server behavior changes. |
+| Continuation context policy | A fresh continuation copies the source agent's resolved context policy and records its profile provenance. It does not re-resolve a mutable profile or copy environment credentials. This requires the daemon fork's optional snapshot fields and context-policy create support. |
 
 The current plugin SDK exposes platform and compact layout, but no reliable
 client/daemon locality. Wide tablet browsers and remote wide-desktop clients

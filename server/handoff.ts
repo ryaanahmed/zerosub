@@ -1,11 +1,39 @@
 import { randomUUID } from "node:crypto";
 import type { PluginHookContext } from "@getpaseo/plugin/server";
+import { z } from "zod";
 import type { AgentTimelineItem } from "./adapter";
 
 type PaseoApi = PluginHookContext["paseo"];
 
 /** Label on a continuation agent naming the agent it carries on from. */
 export const CONTINUED_FROM_LABEL = "zerosub.continued-from";
+export const SOURCE_PROFILE_LABEL = "zerosub.source-profile";
+
+// The daemon supplies these optional snapshot fields; the published SDK predates them.
+// Parse only the policy and provenance, never copy the source agent's environment.
+const ContinuationContextSchema = z.object({
+  contextPolicy: z.object({
+    providerWindowTokens: z.number().int().positive(),
+    clientWindowTokens: z.number().int().positive(),
+    outputReserveTokens: z.number().int().nonnegative(),
+    thresholdTokens: z.number().int().positive(),
+  }).optional(),
+  profileId: z.string().min(1).optional(),
+  labels: z.object({ [SOURCE_PROFILE_LABEL]: z.string().min(1).optional() }).optional(),
+});
+
+export function continuationContext(source: unknown) {
+  const snapshot = ContinuationContextSchema.parse(source);
+  const labels: Record<string, string> = {};
+  const sourceProfile = snapshot.profileId ?? snapshot.labels?.[SOURCE_PROFILE_LABEL];
+  if (sourceProfile) labels[SOURCE_PROFILE_LABEL] = sourceProfile;
+  return {
+    config: snapshot.contextPolicy ? { contextPolicy: snapshot.contextPolicy } : {},
+    // A profile is mutable and may choose another provider. Keep its provenance without
+    // resolving it again; the original agent's concrete policy remains authoritative.
+    labels,
+  };
+}
 
 const MAX_TRANSCRIPT = 40_000;
 const MAX_FIRST_MESSAGE = 6_000;
@@ -133,6 +161,7 @@ export async function continueInNewAgent(options: {
   const refreshed = await paseo.agents.ref(sourceAgentId).refresh();
   const source = refreshed?.agent;
   if (!source) throw new Error("The original agent is no longer available.");
+  const context = continuationContext(source);
 
   let timeline = options.timeline;
   if (!timeline) {
@@ -155,7 +184,7 @@ export async function continueInNewAgent(options: {
     ? `${source.title?.trim() || "Task"} (continued on ${target.label})`
     : `${source.title?.trim() || "Codex task"} (continued)`;
   // Modes and thinking options are provider-specific: only carry them over within one provider.
-  const config = target
+  const providerConfig = target
     ? { provider: `${provider}/${model}`, modeId: target.modeId }
     : {
         provider: `${provider}/${model}`,
@@ -164,10 +193,10 @@ export async function continueInNewAgent(options: {
       };
   const request = {
     agentId,
-    config,
+    config: { ...providerConfig, ...context.config },
     title,
     prompt: continuationPrompt(buildTranscript(timeline), options.why, options.previous),
-    labels: { [CONTINUED_FROM_LABEL]: sourceAgentId },
+    labels: { [CONTINUED_FROM_LABEL]: sourceAgentId, ...context.labels },
   };
   if (source.workspaceId) await paseo.workspaces.ref(source.workspaceId).agents.create(request);
   else await paseo.agents.create({ ...request, cwd: source.cwd });

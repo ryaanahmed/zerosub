@@ -269,7 +269,7 @@ describe("forking to the other provider", () => {
     ],
   };
 
-  async function setUpFork(modeId: string) {
+  async function setUpFork(modeId: string, sourceContext: Record<string, unknown> = {}) {
     const store = new StateStore(join(root, "state.json"));
     await store.update((draft) =>
       Object.assign(draft, {
@@ -278,6 +278,7 @@ describe("forking to the other provider", () => {
       }),
     );
     const source = {
+      ...sourceContext,
       id: AGENT,
       provider: "claude",
       status: "idle",
@@ -356,6 +357,32 @@ describe("forking to the other provider", () => {
     await limitTurn();
     expect(created).toHaveLength(1);
     expect(notes.at(-1)).toMatchObject({ outcome: "continued", continuedIn: { agentId: created[0]?.agentId } });
+  });
+
+  it("keeps concrete context limits when continuing on another provider without copying account environment", async () => {
+    const contextPolicy = {
+      providerWindowTokens: 1_000_000,
+      clientWindowTokens: 500_000,
+      outputReserveTokens: 32_000,
+      thresholdTokens: 400_000,
+    };
+    const { created, limitTurn } = await setUpFork("bypassPermissions", {
+      contextPolicy,
+      profileId: "implementation",
+      env: { ACCOUNT_TOKEN: "test-value" },
+    });
+    await limitTurn();
+    expect(created).toHaveLength(1);
+    expect(created[0]?.config).toEqual({
+      provider: "codex/gpt-5.6-sol",
+      modeId: "full-access",
+      contextPolicy,
+    });
+    expect(created[0]?.labels).toEqual({
+      "zerosub.continued-from": AGENT,
+      "zerosub.source-profile": "implementation",
+    });
+    expect(created[0]).not.toHaveProperty("env");
   });
 
   it("won't fork into a mode more permissive than the original's", async () => {
