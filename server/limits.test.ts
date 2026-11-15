@@ -217,3 +217,13 @@ describe("sign-in failures", () => {
     expect(detectCodexSignOut({ outcome: failed("stream disconnected"), timeline: [] })).toBeNull();
   });
 });
+
+
+describe("model quota notices", () => {
+  it("scopes only explicit model notices and keeps generic and budget notices shared", () => {
+    expect(detectClaudeLimit({ outcome: completed, timeline: turn("You've reached your Fable 5 limit.") }, NOW)?.model).toBe("fable");
+    expect(detectClaudeLimit({ outcome: completed, timeline: turn("You've hit your Opus limit") }, NOW)?.model).toBe("opus");
+    expect(detectClaudeLimit({ outcome: completed, timeline: turn("You've hit your weekly limit") }, NOW)?.model).toBeUndefined();
+    expect(detectClaudeLimit({ outcome: completed, timeline: turn("You've hit your team's shared budget") }, NOW)?.model).toBeUndefined();
+  });
+});

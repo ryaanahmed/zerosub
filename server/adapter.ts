@@ -34,6 +34,8 @@ export type LimitKind = "window" | "budget";
 export type UsageRead = Usage & { retryAt?: number };
 
 export interface LimitHit {
+  /** Explicitly named model; absent notices conservatively apply account-wide. */
+  model?: string;
   kind: LimitKind;
   /** When the limit lifts, if the provider said. */
   resetsAt: string | null;

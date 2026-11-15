@@ -1,3 +1,5 @@
+import { applyUsageLimits } from "./quota-state";
+import { freshUsage, quotaModel, relevantWindows, windowModel } from "../shared/quota";
 import { randomBytes } from "node:crypto";
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";
@@ -71,8 +73,6 @@ const AVAILABILITY_MS = 10 * 60_000;
 const WINDOW_LIMIT_MS = 60 * 60_000;
 /** Budget limits (spend caps, credits) don't show in usage; retry after this long. */
 const BUDGET_LIMIT_MS = 3 * 60 * 60_000;
-/** A fresh limit isn't second-guessed by usage readings for this long. */
-const LIMIT_TRUST_MS = 15 * 60_000;
 const LOGIN_TTL_MS = 15 * 60_000;
 const LOGIN_GRACE_MS = 3_000;
 const PRUNE_MS = 10 * 60_000;
@@ -105,6 +105,7 @@ interface LoginSession {
 interface AgentInfo {
   id: string;
   provider: string;
+  model: string | null;
   status: string;
   archived: boolean;
   /** The conversation has started (so a Codex thread already holds account-bound reasoning). */
@@ -346,7 +347,10 @@ export class Service {
     const adapter = this.adapters[family];
     const now = Date.now();
     const state = await this.store.read();
+    // The session-open SDK has no model; refresh the agent instead of using a cached selection.
+    const model = (await agentInfo(context.paseo, request.agentId))?.model;
     const decision = chooseAccount(state, {
+      model,
       agentId: request.agentId,
       family,
       reason: request.reason,
@@ -451,7 +455,7 @@ export class Service {
     this.deferred.delete(agentId);
     const state = await this.store.read();
     const current = this.runningOn(state, agentId, family);
-    if (!current || this.targetFor(state, agentId, family) === current) return; // Switched back meanwhile.
+    if (!current || this.targetFor(state, agentId, family, (await agentInfo(paseo, agentId))?.model) === current) return; // Switched back meanwhile.
     const outcome = await this.reopenAgent(paseo, agentId, row, true);
     if (outcome === "reopened" && row) await this.appendRow(paseo, agentId, await this.landed(row, agentId));
   }
@@ -499,6 +503,7 @@ export class Service {
     problem: Problem,
   ): Promise<void> {
     const adapter = this.adapters[family];
+    const model = (await agentInfo(paseo, agentId))?.model;
     const now = Date.now();
     if (problem.kind === "limit" && problem.hit.kind === "window" && this.recentlyRedeemed(account.id)) {
       // This turn hit the limit just before a reset refilled it (another agent's failover or the
@@ -517,17 +522,17 @@ export class Service {
     if (problem.kind === "limit") {
       const { hit } = problem;
       resetsAt = hit.resetsAt ?? new Date(now + (hit.kind === "budget" ? BUDGET_LIMIT_MS : WINDOW_LIMIT_MS)).toISOString();
-      await this.markLimited(account.id, resetsAt, hit.kind);
+      await this.markLimited(account.id, resetsAt, hit.kind, hit.model);
       if (hit.kind === "window") {
         // The notice is the freshest word on usage: show that window full until a new reading lands.
         const shown = this.usage.get(account.id);
-        if (shown) this.setUsage(account.id, showLimit(shown, hit.resetsAt));
+        if (shown && !hit.model) this.setUsage(account.id, showLimit(shown, hit.resetsAt));
         // The account was just used, so its token is fresh: ask for the exact reset time.
         await withTimeout(this.refreshUsage(account.id, true), 12_000);
-        const exact = this.resetFromUsage(account.id);
+        const exact = this.resetFromUsage(account.id, hit.model ?? null);
         if (exact && Date.parse(exact) > now) {
           resetsAt = exact;
-          await this.markLimited(account.id, exact, "window");
+          await this.markLimited(account.id, exact, "window", hit.model);
         }
       }
       console.log(`[ZeroSub] ${account.label} hit a ${hit.kind} limit (agent ${agentId}): ${hit.message}`);
@@ -564,7 +569,7 @@ export class Service {
       }
       return;
     }
-    const next = mostAvailable(latest, family, (id) => this.usage.get(id), now, new Set([account.id]));
+    const next = mostAvailable(latest, family, (id) => this.usage.get(id), now, new Set([account.id]), model);
     if (!next) {
       if (problem.kind === "limit" && problem.hit.kind === "window" && this.prefs.autoRedeem && !account.disabled) {
         // Opt-in: every account is out, so spend a banked reset rather than stop.
@@ -692,11 +697,19 @@ export class Service {
     }
   }
 
-  private async markLimited(accountId: string, until: string, kind: LimitKind): Promise<void> {
+  private async markLimited(accountId: string, until: string, kind: LimitKind, model?: string): Promise<void> {
     await this.store.update((draft) => {
       const account = findAccount(draft, accountId);
       if (!account) return;
+      const scoped = kind === "window" ? quotaModel(model) : null;
+      if (scoped) {
+        account.modelLimits = { ...account.modelLimits, [scoped]: { until, at: new Date().toISOString(), source: "notice" } };
+        return;
+      }
+      // A rolling-window notice cannot shorten an independent spend cap.
+      if (kind === "window" && account.limitKind === "budget" && account.limitedUntil && Date.parse(account.limitedUntil) > Date.now()) return;
       account.limitedUntil = until;
+      account.limitSource = "notice";
       account.limitKind = kind;
       account.limitedAt = new Date().toISOString();
     });
@@ -740,6 +753,8 @@ export class Service {
       if (!account) return;
       account.limitedUntil = null;
       account.limitKind = null;
+      account.modelLimits = {};
+      delete account.limitSource;
     });
     if (left !== null) this.updateResetCount(accountId, left);
     // Give the provider a moment to settle before reading the refilled usage.
@@ -804,10 +819,12 @@ export class Service {
   }
 
   /** The reset time of the window that is full, from the freshest live usage reading. */
-  private resetFromUsage(accountId: string): string | null {
+  private resetFromUsage(accountId: string, model: string | null): string | null {
     const usage = this.usage.get(accountId);
-    if (!usage || usage.cached) return null;
-    const full = usage.windows.filter((window) => window.usedPercent >= 99 && window.resetsAt);
+    if (!freshUsage(usage, Date.now())) return null;
+    // An unscoped notice cannot borrow a model-only reset time.
+    const windows = model ? relevantWindows(usage.windows, model) : usage.windows.filter((window) => !windowModel(window));
+    const full = windows.filter((window) => window.usedPercent >= 99 && window.resetsAt);
     full.sort((a, b) => Date.parse(b.resetsAt ?? "") - Date.parse(a.resetsAt ?? ""));
     return full[0]?.resetsAt ?? null;
   }
@@ -853,8 +870,10 @@ export class Service {
         const now = Date.now();
         const latest = await this.store.read();
         if (this.runningOn(latest, agentId, family) !== accountId) continue;
-        const next = mostAvailable(latest, family, (id) => this.usage.get(id), now, new Set([accountId]));
-        if (!next) return;
+        const current = findAccount(latest, accountId);
+        if (reason === "limit" && current && !isLimited(current, now, info.model)) continue;
+        const next = mostAvailable(latest, family, (id) => this.usage.get(id), now, new Set([accountId]), info.model);
+        if (!next) continue;
         await this.store.update((draft) => {
           draft.bindings[agentId] = { accountId: next.id, source: "auto", at: new Date(now).toISOString() };
         });
@@ -1006,8 +1025,9 @@ export class Service {
   // ------------------------------------------------------------------ reopening sessions
 
   /** Where routing would put this agent's next session, including skipping exhausted accounts. */
-  private targetFor(state: StoredState, agentId: string, family: Family): string | undefined {
+  private targetFor(state: StoredState, agentId: string, family: Family, model?: string | null): string | undefined {
     return chooseAccount(state, {
+      model,
       agentId,
       family,
       reason: "refresh",
@@ -1097,7 +1117,7 @@ export class Service {
       const family = families[agent.provider];
       if (!family || this.switching.has(agentId)) continue;
       const current = this.runningOn(state, agentId, family);
-      const target = this.targetFor(state, agentId, family);
+      const target = this.targetFor(state, agentId, family, agent.model);
       if (!current || !target || target === current) continue;
       const row: SwitchRow = {
         family,
@@ -1163,23 +1183,10 @@ export class Service {
       // Only a live reading may change an account's limit state.
       if (usage.windows.length === 0 || usage.error || usage.cached) return;
       const now = Date.now();
-      const full = usage.windows.find((window) => window.usedPercent >= 100 && window.resetsAt);
-      if (full && !isLimited(account, now)) {
-        await this.markLimited(accountId, full.resetsAt ?? new Date(now + WINDOW_LIMIT_MS).toISOString(), "window");
-        return;
-      }
-      // A window limit clears once usage shows room again. Budget limits never appear in usage
-      // windows, and a fresh limit is trusted for a while (it may be on a window we can't see).
-      const settled = account.limitedAt ? now - Date.parse(account.limitedAt) > LIMIT_TRUST_MS : true;
-      const roomy = Math.max(...usage.windows.map((window) => window.usedPercent)) < 90;
-      if (!full && account.limitedUntil && account.limitKind === "window" && settled && roomy) {
-        await this.store.update((draft) => {
-          const target = findAccount(draft, accountId);
-          if (!target) return;
-          target.limitedUntil = null;
-          target.limitKind = null;
-        });
-      }
+      await this.store.update((draft) => {
+        const target = findAccount(draft, accountId);
+        if (target) applyUsageLimits(target, usage, now);
+      });
     })().finally(() => this.usageInFlight.delete(accountId));
     this.usageInFlight.set(accountId, task);
     return task;
@@ -1216,13 +1223,14 @@ export class Service {
     for (const agent of agents) {
       const family = families[agent.provider];
       if (!family || agent.archived) continue;
-      const accountId = this.targetFor(state, agent.id, family);
+      const accountId = this.targetFor(state, agent.id, family, agent.model);
       if (!accountId) continue;
       counts.set(accountId, (counts.get(accountId) ?? 0) + 1);
       const current = isLive(agent.status) ? this.runningOn(state, agent.id, family) : undefined;
       const binding = state.bindings[agent.id];
       routes.push({
         agentId: agent.id,
+        model: agent.model,
         family,
         accountId,
         pinned: Boolean(binding && binding.source !== "thread"),
@@ -1232,7 +1240,8 @@ export class Service {
     }
 
     const accounts: AccountView[] = state.accounts.map((account) => {
-      const limited = isLimited(account, now);
+      // Account management reports shared availability; agent pills add their selected model.
+      const limited = !!account.limitedUntil && Date.parse(account.limitedUntil) > now;
       return {
         id: account.id,
         family: account.family,
@@ -1244,6 +1253,7 @@ export class Service {
         status: !account.signedIn ? "signed_out" : account.disabled ? "disabled" : limited ? "limited" : "ready",
         isDefault: defaultAccount(state, account.family)?.id === account.id,
         limitedUntil: limited ? account.limitedUntil : null,
+        modelLimits: account.modelLimits,
         usage: this.usage.get(account.id) ?? null,
         agentCount: counts.get(account.id) ?? 0,
         home: account.home,
@@ -1350,7 +1360,7 @@ export class Service {
       const latest = await this.store.read();
       stayed = (await listAgents(paseo, false)).agents.filter(
         (agent) =>
-          families[agent.provider] === account.family && agent.hasHistory && this.targetFor(latest, agent.id, account.family) === accountId,
+          families[agent.provider] === account.family && agent.hasHistory && this.targetFor(latest, agent.id, account.family, agent.model) === accountId,
       ).length;
     }
     return { ...summary, stayed };
@@ -1383,6 +1393,8 @@ export class Service {
       if (!account) return;
       account.limitedUntil = null;
       account.limitKind = null;
+      account.modelLimits = {};
+      delete account.limitSource;
     });
     if (!findAccount(state, accountId)) throw new Error("That account no longer exists.");
     void this.refreshUsage(accountId, true).catch(() => undefined);
@@ -1629,6 +1641,8 @@ export class Service {
       applyIdentity(account, identity, draft);
       account.limitedUntil = null;
       account.limitKind = null;
+      account.modelLimits = {};
+      delete account.limitSource;
     });
     if (accountId) this.identityCheckedAt.set(accountId, Date.now());
     session.accountId = accountId;
@@ -1700,6 +1714,7 @@ function toAgentInfo(agent: AgentSnapshot): AgentInfo {
   return {
     id: agent.id,
     provider: agent.provider,
+    model: agent.model ?? null,
     status: agent.status,
     archived: Boolean(agent.archivedAt),
     hasHistory: Boolean(agent.lastUserMessageAt),

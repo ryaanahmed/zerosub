@@ -12,6 +12,7 @@ plugin ID `zerosub`, account storage layout and normal routing behavior.
 | Windows session reload | Node cannot execute the npm `paseo.cmd` launcher directly through `execFile`. Invoke its sibling JavaScript entry point with the plugin's Node executable and separate arguments, without a shell. Refuse a missing entry point; other packaging layouts are not implied supported. |
 | Compact-client sign-in | Mobile web reports platform `web`, so the former native-platform check offered a localhost callback on the wrong computer. Native and compact clients default to code sign-in; wide web clients retain browser sign-in and the explicit method switch remains available. |
 | Mobile plugin startup | Hermes crashes when constructing the bundled client-store class during plugin activation. Use a closure factory with the same store API, polling and cleanup behavior. No account or server behavior changes. |
+| Model-scoped quotas | Explicit Fable, Opus, Sonnet and Haiku quotas are recorded separately and evaluated against each agent's selected model. Shared rolling windows, budgets, sign-out and disabled state still exclude the account. No model is selected or changed by this fix. |
 | Continuation context policy | A fresh continuation copies the source agent's resolved context policy and records its profile provenance. It does not re-resolve a mutable profile or copy environment credentials. This requires the daemon fork's optional snapshot fields and context-policy create support. |
 
 The current plugin SDK exposes platform and compact layout, but no reliable
@@ -104,3 +105,41 @@ was not exercised against live accounts during the rollout.
 Do not publish this package under the upstream npm namespace. The fork is
 installed from Git. Potential upstream contributions can be prepared as separate
 changes; no upstream issue or pull request is opened automatically.
+
+
+## Model quota repair
+
+Account state version 1 and existing account IDs, bindings and sessions are retained.
+Optional `modelLimits` records preserve each named model's reset across reloads;
+optional `limitSource` distinguishes new shared usage marks from notices. Unknown
+quota scopes and notices remain shared. Missing, cached, failed or readings older
+than five minutes cannot create or repair persisted marks. Headroom and routing
+use only the selected model's quotas plus shared quotas; the composer shows the
+same model-specific availability, while account management retains shared status.
+
+Legacy account-wide window marks are repaired automatically only when a fresh
+reading has a full explicitly named model window whose reset exactly matches the
+old mark, both shared Claude windows (`five_hour` and `seven_day`) are below 90%,
+and the old mark has passed the existing fifteen-minute trust interval. Budget,
+unknown-kind and new explicit shared notices are excluded from that repair.
+Missing shared windows or reset timestamp differences require separate evidence
+and a bounded operator reconciliation; this fix does not broadly clear them.
+
+Paseo 0.15.4's session-open hook omits model selection. Existing agents are
+refreshed for their selected model at routing and failover. Initial creation
+runs before the daemon registers the agent, so a model may be unavailable;
+unknown selection conservatively considers every model quota. A model override
+supplied only to session reload is also invisible to this hook until the daemon
+updates the snapshot. Resolving those SDK limitations requires a separate daemon
+change. The ordinary model-selection command updates the snapshot and subsequent
+routing uses that selection.
+
+
+The quota repair passed 156 tests with one existing platform-dependent Hermes
+check skipped on Linux, both TypeScript checks, and `audit:mobile` on Node
+22.23.3. Coverage includes scoped versus shared exhaustion, live-budget
+preservation, Opus failover, model changes on resume, unavailable creation
+snapshots, idle peers on different models, reset inference, composer status and
+conservative legacy repair. The pinned dependency install reported seven
+existing audit findings (one moderate, three high, three critical); dependency
+versions and the lockfile were not changed.

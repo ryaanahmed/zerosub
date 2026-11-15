@@ -71,6 +71,7 @@ export const AccountViewSchema = z.object({
   status: AccountStatusSchema,
   isDefault: z.boolean(),
   limitedUntil: z.string().nullable(),
+  modelLimits: z.record(z.string(), z.object({ until: z.string() })).optional(),
   usage: UsageSchema.nullable(),
   agentCount: z.number(),
   home: z.string().nullable(),
@@ -78,6 +79,7 @@ export const AccountViewSchema = z.object({
 export type AccountView = z.infer<typeof AccountViewSchema>;
 
 export const AgentRouteSchema = z.object({
+  model: z.string().nullable().optional(),
   agentId: z.string(),
   family: FamilySchema,
   /** Account the agent uses now, or will use when its session next opens. */

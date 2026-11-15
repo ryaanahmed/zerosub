@@ -26,6 +26,9 @@ export const StoredAccountSchema = z.object({
   limitKind: z.enum(["window", "budget"]).nullable().default(null),
   /** When the current limit was recorded. */
   limitedAt: z.string().nullable().default(null),
+  /** Model notices and scoped readings never make the whole account unavailable. */
+  modelLimits: z.record(z.string(), z.object({ until: z.string(), at: z.string(), source: z.enum(["usage", "notice"]) })).optional(),
+  limitSource: z.enum(["usage", "notice"]).optional(),
   createdAt: z.string(),
 });
 export type StoredAccount = z.infer<typeof StoredAccountSchema>;

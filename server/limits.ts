@@ -1,3 +1,4 @@
+import { quotaModel } from "../shared/quota";
 import type { LimitHit, LimitKind, TurnEvent } from "./adapter";
 
 /**
@@ -84,7 +85,10 @@ export function detectClaudeLimit(event: TurnEvent, now: Date = new Date()): Lim
   for (const text of notices(event, true)) {
     const line = firstLine(text);
     const match = CLAUDE_LIMITS.find(({ pattern }) => pattern.test(line));
-    if (match) return { message: line, kind: match.kind, resetsAt: parseClaudeReset(line, now) };
+    if (match) {
+      const model = match.kind === "window" ? quotaModel(line.match(/(?:hit|reached) your (.+?) limit/i)?.[1]) : null;
+      return { message: line, kind: match.kind, resetsAt: parseClaudeReset(line, now), ...(model ? { model } : {}) };
+    }
   }
   return null;
 }

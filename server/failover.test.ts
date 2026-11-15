@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentTimelineItem, FamilyAdapter, LimitHit, UsageRead } from "./adapter";
 import type { FamilyResolver } from "./families";
 import { detectClaudeLimit, detectClaudeSignOut, detectCodexLimit, detectCodexSignOut } from "./limits";
@@ -61,13 +61,14 @@ function fakePaseo(family: Family = "claude") {
   const historyReads: Array<{ direction: "tail"; limit: number }> = [];
   const sent: string[] = [];
   const notes: Array<{ from: string | null; to: string; outcome: string; detail: string | null }> = [];
-  const agent = { id: AGENT, provider: family, status: "idle", archivedAt: null, lastUserMessageAt: "2026-09-23T07:00:00.000Z" };
+  const agent = { id: AGENT, model: "claude-opus-5-5", provider: family, status: "idle", archivedAt: null, lastUserMessageAt: "2026-09-23T07:00:00.000Z" };
+  const peers: Array<typeof agent> = [];
   const paseo = {
     config: { get: async () => ({ config: { providers: {} } }) },
     agents: {
-      list: async () => ({ entries: [{ agent }], pageInfo: { hasMore: false, nextCursor: null } }),
-      ref: () => ({
-        refresh: async () => ({ agent }),
+      list: async () => ({ entries: [agent, ...peers].map((entry) => ({ agent: entry })), pageInfo: { hasMore: false, nextCursor: null } }),
+      ref: (id: string) => ({
+        refresh: async () => ({ agent: [agent, ...peers].find((entry) => entry.id === id) ?? agent }),
         send: async (text: string) => void sent.push(text),
         timeline: {
           append: async (item: { data: { from: string | null; to: string; outcome: string; detail: string | null } }) =>
@@ -80,10 +81,11 @@ function fakePaseo(family: Family = "claude") {
       }),
     },
   };
-  return { paseo, sent, notes, history, historyReads };
+  return { paseo, agent, peers, sent, notes, history, historyReads };
 }
 
 interface SetUpOptions {
+  usage?: FamilyAdapter["usage"];
   family?: Family;
   detectSignOut?: FamilyAdapter["detectSignOut"];
   identity?: FamilyAdapter["identity"];
@@ -102,13 +104,13 @@ async function setUp(state: Partial<StoredState>, hit: () => LimitHit, options: 
   const context = { paseo: fake.paseo } as never;
   // Paseo asks for the new session's environment before it closes the old session, so the hook has
   // run by the time `paseo agent reload` returns, even when the reload then failed.
-  const reopenedSession = () =>
-    service.onSessionOpen({ agentId: AGENT, provider: family, reason: "refresh", purpose: "interactive", env: {} } as never, context);
+  const reopenedSession = (agentId = AGENT) =>
+    service.onSessionOpen({ agentId, provider: family, reason: "refresh", purpose: "interactive", env: {} } as never, context);
   const reopener = {
     locate: async () => "/usr/local/bin/paseo",
     reopen: async (id: string) => {
       reopened.push(id);
-      await reopenedSession();
+      await reopenedSession(id);
       if (options.reload === "fails") {
         return { ok: false as const, error: "Timed out closing previous session during refresh", timedOut: false };
       }
@@ -123,6 +125,7 @@ async function setUp(state: Partial<StoredState>, hit: () => LimitHit, options: 
     ...(options.detectLimit ? { detectLimit: options.detectLimit } : {}),
     ...(options.detectSignOut ? { detectSignOut: options.detectSignOut } : {}),
     ...(options.identity ? { identity: options.identity } : {}),
+    ...(options.usage ? { usage: options.usage } : {}),
   };
   const service = new Service(
     adapters,
@@ -546,5 +549,111 @@ describe("disabling an account", () => {
     state = await store.read();
     expect(state.sessions[AGENT]?.accountId).toBe(HELLO);
     expect(reopened).toHaveLength(2);
+  });
+});
+
+
+describe("model-specific failover", () => {
+  it("moves Opus onto an account exhausted only for Fable", async () => {
+    const until = inFuture();
+    const scenario = await setUp({
+      accounts: [account(MAIN, "main", "main"), { ...account(HELLO, "hello", "managed"), modelLimits: { fable: { until, at: new Date().toISOString(), source: "notice" } } }] as never,
+    }, () => ({ kind: "window", resetsAt: until, message: "session limit" }));
+    await scenario.limitTurn();
+    expect(scenario.reopened).toEqual([AGENT]);
+    expect((await scenario.store.read()).bindings[AGENT]?.accountId).toBe(HELLO);
+  });
+
+  it("records an explicit Fable notice without globally limiting the account", async () => {
+    const until = inFuture();
+    const scenario = await setUp({ accounts: [account(MAIN, "main", "main")] as never },
+      () => ({ kind: "window", model: "fable", resetsAt: until, message: "You've reached your Fable limit." }));
+    scenario.agent.model = "claude-fable-5";
+    scenario.service.setPreferences(preferences.schema.parse({ autoSwitch: false }));
+    await scenario.limitTurn();
+    const a = (await scenario.store.read()).accounts[0]!;
+    expect(a.limitedUntil).toBeNull();
+    expect(a.modelLimits?.fable?.until).toBe(until);
+    const view = await scenario.service.view(scenario.paseo as never);
+    expect(view.accounts[0]?.status).toBe("ready");
+    expect(view.accounts[0]?.modelLimits?.fable?.until).toBe(until);
+    expect(view.agents[0]?.model).toBe("claude-fable-5");
+  });
+
+  it("refreshes the selected model on session resume instead of retaining the old model", async () => {
+    const until = inFuture();
+    const scenario = await setUp({ accounts: [
+      { ...account(MAIN, "main", "main"), modelLimits: { fable: { until, at: new Date().toISOString(), source: "notice" } } },
+      account(HELLO, "hello", "managed"),
+    ] as never }, () => ({ kind: "window", resetsAt: until, message: "limit" }));
+    const open = async () => scenario.service.onSessionOpen({ agentId: AGENT, provider: "claude", reason: "resume", purpose: "interactive", env: {} } as never, { paseo: scenario.paseo } as never);
+    scenario.agent.model = "claude-opus-5-5";
+    await open();
+    expect((await scenario.store.read()).sessions[AGENT]?.accountId).toBe(MAIN);
+    scenario.agent.model = "claude-fable-5";
+    await open();
+    expect((await scenario.store.read()).sessions[AGENT]?.accountId).toBe(HELLO);
+  });
+});
+
+
+describe("idle model peers", () => {
+  it("moves idle Fable peers after a Fable limit and leaves idle Opus peers alone", async () => {
+    const until = inFuture();
+    const scenario = await setUp({ accounts: [account(MAIN, "main", "main"), account(HELLO, "hello", "managed")] as never },
+      () => ({ kind: "window", model: "fable", resetsAt: until, message: "Fable limit" }));
+    scenario.agent.model = "claude-fable-5";
+    scenario.peers.push({ ...scenario.agent, id: "opus-peer", model: "claude-opus-5-5" }, { ...scenario.agent, id: "fable-peer" });
+    await scenario.limitTurn();
+    await vi.waitFor(async () => {
+      expect((await scenario.store.read()).sessions["fable-peer"]?.accountId).toBe(HELLO);
+    });
+    expect(scenario.reopened).toEqual([AGENT, "fable-peer"]);
+    expect((await scenario.store.read()).bindings["opus-peer"]).toBeUndefined();
+  });
+});
+
+
+describe("unknown model on creation", () => {
+  it("routes conservatively when a new agent cannot yet be refreshed", async () => {
+    const until = inFuture();
+    const scenario = await setUp({ accounts: [
+      { ...account(MAIN, "main", "main"), modelLimits: { fable: { until, at: new Date().toISOString(), source: "notice" } } },
+      account(HELLO, "hello", "managed"),
+    ] as never }, () => ({ kind: "window", resetsAt: until, message: "limit" }));
+    const paseo = { ...scenario.paseo, agents: { ...scenario.paseo.agents, ref: () => ({ refresh: async () => { throw new Error("agent not registered yet"); } }) } };
+    await scenario.service.onSessionOpen({ agentId: "new-agent", provider: "claude", reason: "create", purpose: "interactive", env: {} } as never, { paseo } as never);
+    expect((await scenario.store.read()).sessions["new-agent"]?.accountId).toBe(HELLO);
+  });
+});
+
+
+describe("model reset inference", () => {
+  it("uses the exhausted model's reset rather than another model's later reset", async () => {
+    const until = inFuture();
+    const later = new Date(Date.now() + 24 * 60 * 60_000).toISOString();
+    const scenario = await setUp({ accounts: [account(MAIN, "main", "main")] as never },
+      () => ({ kind: "window", model: "fable", resetsAt: null, message: "Fable limit" }), {
+        usage: async () => ({ fetchedAt: new Date().toISOString(), cached: false, error: null, resets: null, windows: [
+          { id: "weekly_fable", label: "Fable", usedPercent: 100, resetsAt: until },
+          { id: "seven_day_opus", label: "Opus", usedPercent: 100, resetsAt: later },
+        ] }),
+      });
+    scenario.service.setPreferences(preferences.schema.parse({ autoSwitch: false }));
+    await scenario.limitTurn();
+    const a = (await scenario.store.read()).accounts[0]!;
+    expect(a.modelLimits?.fable?.until).toBe(until);
+    expect(a.modelLimits?.opus?.until).toBe(later);
+    expect(a.limitedUntil).toBeNull();
+  });
+
+  it("does not replace a live budget limit with a rolling-window notice", async () => {
+    const budgetUntil = new Date(Date.now() + 24 * 60 * 60_000).toISOString();
+    const scenario = await setUp({ accounts: [{ ...account(MAIN, "main", "main"), limitedUntil: budgetUntil, limitKind: "budget" }] as never },
+      () => ({ kind: "window", resetsAt: inFuture(), message: "session limit" }));
+    scenario.service.setPreferences(preferences.schema.parse({ autoSwitch: false }));
+    await scenario.limitTurn();
+    expect((await scenario.store.read()).accounts[0]?.limitedUntil).toBe(budgetUntil);
+    expect((await scenario.store.read()).accounts[0]?.limitKind).toBe("budget");
   });
 });

@@ -1,3 +1,4 @@
+import { freshUsage, modelLimitUntil, relevantWindows } from "../shared/quota";
 import { peakUsage } from "../shared/format";
 import type { Family, Usage } from "../shared/model";
 import {
@@ -10,19 +11,30 @@ import {
   type StoredState,
 } from "./state";
 
-export function isLimited(account: StoredAccount, now: number): boolean {
+export function isLimited(account: StoredAccount, now: number, model?: string | null): boolean {
+  if (modelLimitUntil(account.modelLimits, model, now)) return true;
   if (!account.limitedUntil) return false;
   const until = Date.parse(account.limitedUntil);
   return Number.isFinite(until) && until > now;
 }
 
-export function isUsable(account: StoredAccount, now: number): boolean {
-  return account.signedIn && !account.disabled && !isLimited(account, now);
+export function isUsable(account: StoredAccount, now: number, model?: string | null): boolean {
+  return account.signedIn && !account.disabled && !isLimited(account, now, model);
+}
+
+/** Fresh applicable windows also block routing before their persisted marks are reconciled. */
+export function usageLimited(usage: Usage | null | undefined, now: number, model?: string | null): boolean {
+  if (!freshUsage(usage, now)) return false;
+  return relevantWindows(usage.windows, model).some((window) => {
+    if (window.usedPercent < 100) return false;
+    const reset = Date.parse(window.resetsAt ?? "");
+    return !Number.isFinite(reset) || reset > now;
+  });
 }
 
 /** Lower is better. Unknown usage ranks in the middle so a known-quiet account wins over a mystery. */
-export function headroomScore(usage: Usage | null | undefined): number {
-  const peak = usage ? peakUsage(usage.windows) : null;
+export function headroomScore(usage: Usage | null | undefined, model?: string | null): number {
+  const peak = usage ? peakUsage(relevantWindows(usage.windows, model)) : null;
   return peak ? peak.usedPercent : 50;
 }
 
@@ -33,13 +45,15 @@ export function mostAvailable(
   usageOf: (accountId: string) => Usage | null | undefined,
   now: number,
   exclude: ReadonlySet<string> = new Set(),
+  model?: string | null,
 ): StoredAccount | undefined {
   const preferred = defaultAccount(state, family)?.id;
   const candidates = accountsOf(state, family).filter(
-    (account) => !exclude.has(account.id) && isUsable(account, now),
+    (account) => !exclude.has(account.id) && isUsable(account, now, model) &&
+      !usageLimited(usageOf(account.id), now, model),
   );
   const rank = (account: StoredAccount) => [
-    headroomScore(usageOf(account.id)),
+    headroomScore(freshUsage(usageOf(account.id), now) ? usageOf(account.id) : null, model),
     account.id === preferred ? 0 : 1,
     account.kind === "main" ? 0 : 1,
     Date.parse(account.createdAt) || 0,
@@ -57,6 +71,7 @@ export function mostAvailable(
 }
 
 export interface RouteInput {
+  model?: string | null;
   agentId: string;
   family: Family;
   reason: "create" | "resume" | "refresh" | "import";
@@ -98,7 +113,7 @@ export function chooseAccount(state: StoredState, input: RouteInput): RouteDecis
   let bind: Binding | null = null;
 
   if (!account && fresh && input.balanceNewAgents && accounts.length > 1) {
-    account = mostAvailable(state, input.family, input.usageOf, input.now);
+    account = mostAvailable(state, input.family, input.usageOf, input.now, new Set(), input.model);
     if (account) bind = { accountId: account.id, source: "balance", at };
   }
   if (!account) {
@@ -111,10 +126,10 @@ export function chooseAccount(state: StoredState, input: RouteInput): RouteDecis
   if (!account) return null;
 
   let skipped: RouteDecision["skipped"] = null;
-  const why = !account.signedIn ? "signed_out" : account.disabled ? "disabled" : isLimited(account, input.now) ? "limited" : null;
+  const why = !account.signedIn ? "signed_out" : account.disabled ? "disabled" : (isLimited(account, input.now, input.model) || usageLimited(input.usageOf(account.id), input.now, input.model)) ? "limited" : null;
   const mayMove = fresh || input.portable;
   if (why && mayMove && (input.autoSwitch || why !== "limited")) {
-    const alternative = mostAvailable(state, input.family, input.usageOf, input.now, new Set([account.id]));
+    const alternative = mostAvailable(state, input.family, input.usageOf, input.now, new Set([account.id]), input.model);
     if (alternative) {
       skipped = { account, why };
       account = alternative;

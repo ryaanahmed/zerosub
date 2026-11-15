@@ -1,3 +1,4 @@
+import { accountForModel } from "../shared/quota";
 import type {
   PluginButton,
   PluginButtonMenuEntry,
@@ -147,8 +148,10 @@ function buttonFor(
   if (!state.showComposerPill) return null;
   const family = state.providers[agent.provider];
   if (!family) return null;
-  const accounts = state.accounts.filter((account) => account.family === family);
   const route = state.agents.find((entry) => entry.agentId === agent.id);
+  // The same account can be exhausted for Fable while remaining available for Opus.
+  const accounts = state.accounts.filter((account) => account.family === family)
+    .map((account) => accountForModel(account, route?.model, Date.now()));
   const current =
     accounts.find((account) => account.id === route?.accountId) ??
     accounts.find((account) => account.isDefault) ??
