@@ -4,7 +4,8 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { AgentTimelineItem, FamilyAdapter, LimitHit, UsageRead } from "./adapter";
 import type { FamilyResolver } from "./families";
-import { detectClaudeLimit } from "./limits";
+import { detectClaudeLimit, detectClaudeSignOut, detectCodexLimit, detectCodexSignOut } from "./limits";
+import type { Family } from "../shared/model";
 import type { Reopener } from "./reopen";
 import { Service } from "./service";
 import { MAIN_ACCOUNT_ID, StateStore, type StoredState } from "./state";
@@ -29,8 +30,8 @@ afterEach(async () => {
   await rm(root, { recursive: true, force: true });
 });
 
-function account(id: string, label: string, kind: "main" | "managed") {
-  return { id, family: "claude" as const, label, kind, home: kind === "main" ? null : join(tmpdir(), id), createdAt: "2026-09-23T00:00:00.000Z" };
+function account(id: string, label: string, kind: "main" | "managed", family: Family = "claude") {
+  return { id, family, label, kind, home: kind === "main" ? null : join(tmpdir(), id), createdAt: "2026-09-23T00:00:00.000Z" };
 }
 
 /** A Claude adapter whose every failed turn is a session limit resetting at `resetsAt`. */
@@ -55,10 +56,12 @@ function claudeAdapter(hit: () => LimitHit): FamilyAdapter {
   } as unknown as FamilyAdapter;
 }
 
-function fakePaseo() {
+function fakePaseo(family: Family = "claude") {
+  const history: AgentTimelineItem[] = [];
+  const historyReads: Array<{ direction: "tail"; limit: number }> = [];
   const sent: string[] = [];
   const notes: Array<{ from: string | null; to: string; outcome: string; detail: string | null }> = [];
-  const agent = { id: AGENT, provider: "claude", status: "idle", archivedAt: null, lastUserMessageAt: "2026-09-23T07:00:00.000Z" };
+  const agent = { id: AGENT, provider: family, status: "idle", archivedAt: null, lastUserMessageAt: "2026-09-23T07:00:00.000Z" };
   const paseo = {
     config: { get: async () => ({ config: { providers: {} } }) },
     agents: {
@@ -69,15 +72,21 @@ function fakePaseo() {
         timeline: {
           append: async (item: { data: { from: string | null; to: string; outcome: string; detail: string | null } }) =>
             void notes.push(item.data),
-          refetch: async () => ({ entries: [] }),
+          refetch: async (request: { direction: "tail"; limit: number }) => {
+            historyReads.push(request);
+            return { entries: history.slice(-request.limit).map((item) => ({ item })) };
+          },
         },
       }),
     },
   };
-  return { paseo, sent, notes };
+  return { paseo, sent, notes, history, historyReads };
 }
 
 interface SetUpOptions {
+  family?: Family;
+  detectSignOut?: FamilyAdapter["detectSignOut"];
+  identity?: FamilyAdapter["identity"];
   /** How `paseo agent reload` ends. */
   reload?: "works" | "fails" | "times out";
   /** Reads turns with a real detector instead of taking every failed turn for a limit. */
@@ -88,12 +97,13 @@ async function setUp(state: Partial<StoredState>, hit: () => LimitHit, options: 
   const store = new StateStore(join(root, "state.json"));
   await store.update((draft) => Object.assign(draft, state));
   const reopened: string[] = [];
-  const fake = fakePaseo();
+  const family = options.family ?? "claude";
+  const fake = fakePaseo(family);
   const context = { paseo: fake.paseo } as never;
   // Paseo asks for the new session's environment before it closes the old session, so the hook has
   // run by the time `paseo agent reload` returns, even when the reload then failed.
   const reopenedSession = () =>
-    service.onSessionOpen({ agentId: AGENT, provider: "claude", reason: "refresh", purpose: "interactive", env: {} } as never, context);
+    service.onSessionOpen({ agentId: AGENT, provider: family, reason: "refresh", purpose: "interactive", env: {} } as never, context);
   const reopener = {
     locate: async () => "/usr/local/bin/paseo",
     reopen: async (id: string) => {
@@ -106,10 +116,16 @@ async function setUp(state: Partial<StoredState>, hit: () => LimitHit, options: 
       return { ok: true as const };
     },
   };
-  const families = { resolve: async () => ({ claude: "claude" as const }) };
-  const claude = { ...claudeAdapter(hit), ...(options.detectLimit ? { detectLimit: options.detectLimit } : {}) };
+  const families = { resolve: async () => ({ claude: "claude" as const, codex: "codex" as const }) };
+  const adapters: Record<Family, FamilyAdapter> = { claude: claudeAdapter(hit), codex: { ...claudeAdapter(hit), family: "codex", portable: false } };
+  adapters[family] = {
+    ...adapters[family],
+    ...(options.detectLimit ? { detectLimit: options.detectLimit } : {}),
+    ...(options.detectSignOut ? { detectSignOut: options.detectSignOut } : {}),
+    ...(options.identity ? { identity: options.identity } : {}),
+  };
   const service = new Service(
-    { claude, codex: claudeAdapter(hit) },
+    adapters,
     store,
     families as unknown as FamilyResolver,
     reopener as unknown as Reopener,
@@ -254,6 +270,75 @@ describe("failover", () => {
   });
 });
 
+describe("turn hooks without inline history", () => {
+  const cases = [
+    { family: "claude" as const, detectLimit: detectClaudeLimit, detectSignOut: detectClaudeSignOut,
+      limit: "You've hit your session limit", signedOut: "Not logged in · Please run /login" },
+    { family: "codex" as const, detectLimit: detectCodexLimit, detectSignOut: detectCodexSignOut,
+      limit: "[System Error] You’ve hit your usage limit.", signedOut: "[System Error] Your refresh token was already used. Please log out and sign in again." },
+  ];
+
+  it.each(cases)("reads a bounded sample for a completed $family limit", async ({ family, detectLimit, limit }) => {
+    const id = MAIN_ACCOUNT_ID[family];
+    const scenario = await setUp({ accounts: [account(id, "main", "main", family)] as never },
+      () => { throw new Error("use the real detector"); }, { family, detectLimit });
+    scenario.service.setPreferences(preferences.schema.parse({ autoSwitch: false }));
+    scenario.history.push({ type: "user_message", text: "Finish the work" }, { type: "assistant_message", text: limit });
+    await scenario.service.onTurnEnded({
+      agent: { id: AGENT, provider: family }, turnId: "completed-turn", outcome: { kind: "completed" }, timeline: [],
+    } as never, { paseo: scenario.paseo } as never);
+    expect(scenario.historyReads).toEqual([{ direction: "tail", limit: 20 }]);
+    expect((await scenario.store.read()).accounts.find((entry) => entry.id === id)?.limitedUntil).not.toBeNull();
+    expect(scenario.reopened).toEqual([]);
+  });
+
+  it.each(cases)("checks completed $family sign-out notices against the account identity", async ({ family, detectLimit, detectSignOut, signedOut }) => {
+    const id = MAIN_ACCOUNT_ID[family];
+    let identityReads = 0;
+    const scenario = await setUp({ accounts: [account(id, "main", "main", family)] as never },
+      () => { throw new Error("use the real detector"); }, {
+        family, detectLimit, detectSignOut,
+        identity: async () => {
+          identityReads += 1;
+          return { signedIn: false, email: null, plan: null, organization: null, identity: null };
+        },
+      });
+    scenario.service.setPreferences(preferences.schema.parse({ autoSwitch: false }));
+    scenario.history.push({ type: "assistant_message", text: signedOut });
+    await scenario.service.onTurnEnded({
+      agent: { id: AGENT, provider: family }, turnId: "completed-turn", outcome: { kind: "completed" }, timeline: [],
+    } as never, { paseo: scenario.paseo } as never);
+    expect(scenario.historyReads).toEqual([{ direction: "tail", limit: 20 }]);
+    expect(identityReads).toBe(1);
+    expect((await scenario.store.read()).accounts.find((entry) => entry.id === id)?.signedIn).toBe(false);
+    expect(scenario.reopened).toEqual([]);
+  });
+
+  it.each(cases)("uses structured $family failures without reading history", async ({ family, detectLimit, limit }) => {
+    const id = MAIN_ACCOUNT_ID[family];
+    const scenario = await setUp({ accounts: [account(id, "main", "main", family)] as never },
+      () => { throw new Error("use the real detector"); }, { family, detectLimit });
+    scenario.service.setPreferences(preferences.schema.parse({ autoSwitch: false }));
+    await scenario.service.onTurnEnded({
+      agent: { id: AGENT, provider: family }, turnId: "failed-turn", outcome: { kind: "failed", error: { message: limit } }, timeline: [],
+    } as never, { paseo: scenario.paseo } as never);
+    expect(scenario.historyReads).toEqual([]);
+    expect((await scenario.store.read()).accounts.find((entry) => entry.id === id)?.limitedUntil).not.toBeNull();
+  });
+
+  it.each(["failed", "canceled"] as const)("does not inspect a preceding turn after %s admission", async (kind) => {
+    const scenario = await setUp({ accounts: [account(MAIN, "main", "main")] as never },
+      () => { throw new Error("use the real detector"); }, { detectLimit: detectClaudeLimit });
+    scenario.history.push({ type: "assistant_message", text: "You've hit your session limit" });
+    const outcome = kind === "failed" ? { kind, error: { message: "Claude session is closed" } } : { kind, reason: "Stopped" };
+    await scenario.service.onTurnEnded({
+      agent: { id: AGENT, provider: "claude" }, turnId: null, outcome, timeline: [],
+    } as never, { paseo: scenario.paseo } as never);
+    expect(scenario.historyReads).toEqual([]);
+    expect((await scenario.store.read()).accounts.find((entry) => entry.id === MAIN)?.limitedUntil).toBeNull();
+  });
+});
+
 describe("forking to the other provider", () => {
   const CODEX_MAIN = MAIN_ACCOUNT_ID.codex;
   const MODES: Record<string, Array<{ id: string; label: string; colorTier: string }>> = {
@@ -269,7 +354,9 @@ describe("forking to the other provider", () => {
     ],
   };
 
-  async function setUpFork(modeId: string, sourceContext: Record<string, unknown> = {}) {
+  async function setUpFork(modeId: string, sourceContext: Record<string, unknown> = {}, detectLimit?: FamilyAdapter["detectLimit"]) {
+    const history: AgentTimelineItem[] = [];
+    const historyReads: Array<{ direction: "tail"; limit: number }> = [];
     const store = new StateStore(join(root, "state.json"));
     await store.update((draft) =>
       Object.assign(draft, {
@@ -315,13 +402,22 @@ describe("forking to the other provider", () => {
         ref: () => ({
           refresh: async () => ({ agent: source }),
           send: async () => undefined,
-          timeline: { append: async (item: { data: (typeof notes)[number] }) => void notes.push(item.data), refetch: async () => ({ entries: [] }) },
+          timeline: {
+            append: async (item: { data: (typeof notes)[number] }) => void notes.push(item.data),
+            refetch: async (request: { direction: "tail"; limit: number }) => {
+              historyReads.push(request);
+              return { entries: history.slice(-request.limit).map((item) => ({ item })) };
+            },
+          },
         }),
       },
     };
     const service = new Service(
       {
-        claude: claudeAdapter(() => ({ kind: "window", resetsAt: inFuture(), message: "You've hit your session limit" })),
+        claude: {
+          ...claudeAdapter(() => ({ kind: "window", resetsAt: inFuture(), message: "You've hit your session limit" })),
+          ...(detectLimit ? { detectLimit } : {}),
+        },
         codex: { ...claudeAdapter(() => ({ kind: "window", resetsAt: null, message: "" })), family: "codex", portable: false } as FamilyAdapter,
       },
       store,
@@ -335,7 +431,7 @@ describe("forking to the other provider", () => {
         { agent: { id: AGENT, provider: "claude" }, turnId: "t", outcome: { kind: "failed", error: { message: "limit" } }, timeline: [] } as never,
         context,
       );
-    return { store, created, notes, limitTurn };
+    return { store, created, notes, limitTurn, history, historyReads, service, paseo };
   }
 
   it("carries the work on with the other provider, at the same permission level", async () => {
@@ -349,6 +445,36 @@ describe("forking to the other provider", () => {
     expect(fork?.prompt).toMatch(/earlier Claude Code session that stopped because every Claude account reached its usage limit/);
     expect((await store.read()).bindings[fork?.agentId ?? ""]).toMatchObject({ accountId: CODEX_MAIN, source: "thread" });
     expect(notes.at(-1)).toMatchObject({ outcome: "continued", toFamily: "codex", to: "hello", continuedIn: { agentId: fork?.agentId } });
+  });
+
+  it("fetches continuation history separately from the bounded detection sample", async () => {
+    const scenario = await setUpFork("bypassPermissions", {}, detectClaudeLimit);
+    scenario.history.push({ type: "user_message", text: "Keep the original opening request" });
+    for (let index = 0; index < 25; index += 1) {
+      scenario.history.push({ type: "assistant_message", text: `Completed step ${index}` });
+    }
+    scenario.history.push({ type: "assistant_message", text: "You've hit your session limit" });
+    await scenario.service.onTurnEnded({
+      agent: { id: AGENT, provider: "claude" }, turnId: "completed-turn", outcome: { kind: "completed" }, timeline: [],
+    } as never, { paseo: scenario.paseo } as never);
+    expect(scenario.historyReads).toEqual([{ direction: "tail", limit: 20 }, { direction: "tail", limit: 500 }]);
+    expect(scenario.created).toHaveLength(1);
+    expect(scenario.created[0]?.prompt).toContain("User: Keep the original opening request");
+    expect(scenario.created[0]?.prompt).toContain("Completed step 24");
+  });
+
+  it("retains a nonempty older hook timeline for detection and continuation", async () => {
+    const scenario = await setUpFork("bypassPermissions", {}, detectClaudeLimit);
+    const timeline: AgentTimelineItem[] = [
+      { type: "user_message", text: "Original hook history" },
+      { type: "assistant_message", text: "You've hit your session limit" },
+    ];
+    await scenario.service.onTurnEnded({
+      agent: { id: AGENT, provider: "claude" }, turnId: "completed-turn", outcome: { kind: "completed" }, timeline,
+    } as never, { paseo: scenario.paseo } as never);
+    expect(scenario.historyReads).toEqual([]);
+    expect(scenario.created).toHaveLength(1);
+    expect(scenario.created[0]?.prompt).toContain("User: Original hook history");
   });
 
   it("points at the earlier fork instead of starting another", async () => {

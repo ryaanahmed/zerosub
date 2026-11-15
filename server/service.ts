@@ -404,10 +404,21 @@ export class Service {
     const accountId = this.runningOn(await this.store.read(), agentId, family);
     if (accountId) this.activeAt.set(accountId, Date.now());
     if (event.outcome.kind !== "canceled") {
-      const hit = adapter.detectLimit(event);
-      if (hit) return this.handleUnavailable(context.paseo, agentId, family, event.timeline, { kind: "limit", hit });
-      if (adapter.detectSignOut(event) && (await this.confirmSignedOut(agentId, family))) {
-        return this.handleUnavailable(context.paseo, agentId, family, event.timeline, { kind: "signed_out" });
+      const timeline = event.timeline.length ? event.timeline : undefined;
+      let hit = adapter.detectLimit(event);
+      let signedOut = hit ? null : adapter.detectSignOut(event);
+      // New hooks omit history. Read only recent notices when the failure itself supplied none,
+      // and never inspect the previous turn when this turn failed before it started.
+      if (!hit && !signedOut && !timeline && event.turnId !== null) {
+        const page = await context.paseo.agents.ref(agentId).timeline.refetch({ direction: "tail", limit: 20 });
+        const detectionEvent = { ...event, timeline: page.entries.map((entry) => entry.item) };
+        hit = adapter.detectLimit(detectionEvent);
+        signedOut = hit ? null : adapter.detectSignOut(detectionEvent);
+      }
+      // Keep the notice sample separate: a continuation fetches its own longer conversation.
+      if (hit) return this.handleUnavailable(context.paseo, agentId, family, timeline, { kind: "limit", hit });
+      if (signedOut && (await this.confirmSignedOut(agentId, family))) {
+        return this.handleUnavailable(context.paseo, agentId, family, timeline, { kind: "signed_out" });
       }
     }
     if (this.deferred.has(agentId)) await this.finishDeferred(context.paseo, agentId, family);
@@ -457,7 +468,7 @@ export class Service {
     paseo: PaseoApi,
     agentId: string,
     family: Family,
-    timeline: readonly AgentTimelineItem[],
+    timeline: readonly AgentTimelineItem[] | undefined,
     problem: Problem,
   ): Promise<void> {
     if (this.switching.has(agentId)) return;
@@ -484,7 +495,7 @@ export class Service {
     agentId: string,
     family: Family,
     account: StoredAccount,
-    timeline: readonly AgentTimelineItem[],
+    timeline: readonly AgentTimelineItem[] | undefined,
     problem: Problem,
   ): Promise<void> {
     const adapter = this.adapters[family];
