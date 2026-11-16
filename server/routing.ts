@@ -1,4 +1,4 @@
-import { freshUsage, modelLimitUntil, relevantWindows } from "../shared/quota";
+import { freshUsage, modelLimitUntil, quotaModel, relevantWindows, windowModel } from "../shared/quota";
 import { peakUsage } from "../shared/format";
 import type { Family, Usage } from "../shared/model";
 import {
@@ -38,7 +38,31 @@ export function headroomScore(usage: Usage | null | undefined, model?: string | 
   return peak ? peak.usedPercent : 50;
 }
 
-/** The usable account with the most room, preferring the default, then the CLI login, on ties. */
+/**
+ * Whether the account's Fable quota is spent until a later reset, by a persisted mark or a fresh
+ * reading. Shared quota left on such an account can only be spent by the other models.
+ */
+export function fableExhausted(account: StoredAccount, usage: Usage | null | undefined, now: number): boolean {
+  if (modelLimitUntil(account.modelLimits, "fable", now)) return true;
+  if (!freshUsage(usage, now)) return false;
+  return usage.windows.some((window) => {
+    if (windowModel(window) !== "fable" || window.usedPercent < 100) return false;
+    const reset = Date.parse(window.resetsAt ?? "");
+    return !Number.isFinite(reset) || reset > now;
+  });
+}
+
+/** An agent on a named model other than Fable should spend Fable-exhausted accounts first. */
+function prefersFableExhausted(model: string | null | undefined): boolean {
+  const selected = quotaModel(model);
+  return selected !== null && selected !== "fable";
+}
+
+/**
+ * The usable account with the most room, preferring the default, then the CLI login, on ties.
+ * For Opus, Sonnet and Haiku agents, accounts whose Fable quota is spent rank ahead of every
+ * other account, so their remaining shared quota is used before a Fable-capable account's.
+ */
 export function mostAvailable(
   state: StoredState,
   family: Family,
@@ -52,7 +76,9 @@ export function mostAvailable(
     (account) => !exclude.has(account.id) && isUsable(account, now, model) &&
       !usageLimited(usageOf(account.id), now, model),
   );
+  const spendExhaustedFirst = prefersFableExhausted(model);
   const rank = (account: StoredAccount) => [
+    spendExhaustedFirst && !fableExhausted(account, usageOf(account.id), now) ? 1 : 0,
     headroomScore(freshUsage(usageOf(account.id), now) ? usageOf(account.id) : null, model),
     account.id === preferred ? 0 : 1,
     account.kind === "main" ? 0 : 1,
@@ -115,6 +141,14 @@ export function chooseAccount(state: StoredState, input: RouteInput): RouteDecis
   if (!account && fresh && input.balanceNewAgents && accounts.length > 1) {
     account = mostAvailable(state, input.family, input.usageOf, input.now, new Set(), input.model);
     if (account) bind = { accountId: account.id, source: "balance", at };
+  }
+  if (!account && fresh && prefersFableExhausted(input.model)) {
+    // A new Opus, Sonnet or Haiku agent opens on a Fable-exhausted account when one has room.
+    const roomiest = mostAvailable(state, input.family, input.usageOf, input.now, new Set(), input.model);
+    if (roomiest && fableExhausted(roomiest, input.usageOf(roomiest.id), input.now)) {
+      account = roomiest;
+      bind = { accountId: roomiest.id, source: "balance", at };
+    }
   }
   if (!account) {
     // An imported Codex thread most likely came from the user's own CLI, so it belongs to that login.

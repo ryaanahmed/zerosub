@@ -238,3 +238,50 @@ describe("disabled accounts", () => {
     expect(mostAvailable(state, "claude", usageOf, NOW)?.id).toBe("claude-main");
   });
 });
+
+describe("Fable-exhausted accounts", () => {
+  const fresh = account({ id: "claude-fresh" });
+  const spent = account({ id: "claude-spent" });
+  const state = stateWith([fresh, spent], { defaults: { claude: "claude-fresh", codex: null } });
+
+  function weekly(shared: number, fable: number): Usage {
+    return {
+      fetchedAt: "2026-09-23T11:59:00Z",
+      windows: [
+        { id: "seven_day", label: "Weekly", usedPercent: shared, resetsAt: "2026-09-25T00:00:00Z" },
+        { id: "weekly_fable", label: "Weekly · Fable", usedPercent: fable, resetsAt: "2026-09-25T00:00:00Z" },
+      ],
+      error: null,
+      cached: false,
+      resets: null,
+    };
+  }
+  const usageOf = (id: string) => (id === "claude-spent" ? weekly(60, 100) : weekly(0, 0));
+
+  it("opens a new Opus agent on the Fable-exhausted account despite its lower shared headroom", () => {
+    const decision = chooseAccount(state, { ...base, reason: "create", model: "claude-opus-5-5", usageOf });
+    expect(decision?.account.id).toBe("claude-spent");
+    expect(decision?.bind?.accountId).toBe("claude-spent");
+  });
+
+  it("keeps a new Fable agent on the default account", () => {
+    const decision = chooseAccount(state, { ...base, reason: "create", model: "claude-fable-5-2", usageOf });
+    expect(decision?.account.id).toBe("claude-fresh");
+  });
+
+  it("keeps an agent of unknown model on the default account", () => {
+    const decision = chooseAccount(state, { ...base, reason: "create", usageOf });
+    expect(decision?.account.id).toBe("claude-fresh");
+  });
+
+  it("falls back to the default when the Fable-exhausted account has no shared quota left", () => {
+    const full = (id: string) => (id === "claude-spent" ? weekly(100, 100) : weekly(0, 0));
+    const decision = chooseAccount(state, { ...base, reason: "create", model: "claude-opus-5-5", usageOf: full });
+    expect(decision?.account.id).toBe("claude-fresh");
+  });
+
+  it("ranks Fable-exhausted accounts first when an Opus agent fails over", () => {
+    expect(mostAvailable(state, "claude", usageOf, NOW, new Set(), "claude-opus-5-5")?.id).toBe("claude-spent");
+    expect(mostAvailable(state, "claude", usageOf, NOW, new Set(), "claude-fable-5-2")?.id).toBe("claude-fresh");
+  });
+});
