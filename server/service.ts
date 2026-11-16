@@ -35,7 +35,7 @@ import {
 import { FamilyResolver } from "./families";
 import { CONTINUED_FROM_LABEL, continueInNewAgent, type Continuation } from "./handoff";
 import { removeHome } from "./homes";
-import { readModelHint } from "./model-hints";
+import { readModelHint, titleHintKey } from "./model-hints";
 import { Mutex } from "./json-file";
 import { canSignInWithBrowser } from "./machine";
 import { equivalentMode } from "./modes";
@@ -350,7 +350,13 @@ export class Service {
     const state = await this.store.read();
     // The session-open SDK has no model; refresh the agent instead of using a cached selection.
     // A new agent is not registered yet, so its model comes from the dispatcher's hint if one exists.
-    const model = (await agentInfo(context.paseo, request.agentId))?.model ?? (await readModelHint(request.agentId));
+    // The hint is filed under the agent's ID, or under its title when the dispatcher only knows that.
+    const title = (request as { title?: string | null }).title;
+    const titleKey = titleHintKey(title);
+    const model =
+      (await agentInfo(context.paseo, request.agentId))?.model ??
+      (await readModelHint(request.agentId)) ??
+      (titleKey ? await readModelHint(titleKey) : null);
     const decision = chooseAccount(state, {
       model,
       agentId: request.agentId,
